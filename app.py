@@ -188,7 +188,7 @@ def login():
 #-----GOOGLE AUTH AUTHENTICATION-----
 #https://127.0.0.1:80/google_start
 #https://127.0.0.1:80//google_signup
-@app.route("/google_signup", methods=["GET"])
+@app.route("/google_signup", methods=["GET"]) #yet to be tested
 def google_login_new():
     # Find out what URL to hit for Google login
     google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
@@ -203,8 +203,6 @@ def google_login_new():
         access_type='offline'
     )
     return redirect(request_uri)
-
-
 @app.route("/google_connect", methods=["GET"])
 @jwt_required()
 def google_login_old():
@@ -393,7 +391,7 @@ if __name__ == '__main__':
         #db.drop_all()  # Drop all tables
         db.create_all()  # Create all tables
     app.run(host='0.0.0.0', port=80, debug=True,
-            ssl_context=('cert.pem', 'key.pem')
+            #ssl_context=('cert.pem', 'key.pem')
             )
 
 
