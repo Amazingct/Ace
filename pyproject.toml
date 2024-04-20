@@ -27,6 +27,8 @@ websockets = "^12.0"
 websocket-client = "^1.7.0"
 python-dotenv = "^1.0.1"
 pyaudio = "^0.2.14"
+oauthlib = "^3.2.2"
+cryptography = "^42.0.5"
 
 
 [tool.poetry.group.dev.dependencies]

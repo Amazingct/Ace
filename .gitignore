@@ -1,5 +1,6 @@
 .venv
 /developer/dropbox.json
+/developer/google.json
 /flask_session
 /Front-end/react-app/node_modules/*
 /Front-end/react-app/.env

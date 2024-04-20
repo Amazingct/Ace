@@ -8,9 +8,29 @@ from dropbox import DropboxOAuth2Flow, Dropbox, files, DropboxOAuth2FlowNoRedire
 import json
 import dropbox
 from flask import make_response
+from oauthlib.oauth2 import WebApplicationClient
+import os
+import requests
+from flask import url_for, session
+from cryptography.fernet import Fernet
+key = Fernet.generate_key()  # Store this key securely!
+cipher_suite = Fernet(key)
 
-with open('/Users/daniel/Desktop/Projects/Ace/developer/dropbox.json') as f:
+with open('developer/dropbox.json') as f:
     data = json.load(f)
+with open('developer/google.json') as f:
+    gdata = json.load(f)
+
+
+
+
+GOOGLE_CLIENT_ID = gdata['web']['client_id']
+GOOGLE_CLIENT_SECRET = gdata['web']['client_secret']
+GOOGLE_DISCOVERY_URL = (
+    "https://accounts.google.com/.well-known/openid-configuration"
+)
+
+client = WebApplicationClient(GOOGLE_CLIENT_ID)
 
 APP_KEY = data['App_key']
 APP_SECRET = data['App_secret']
@@ -67,7 +87,7 @@ class User(db.Model):
     provider_id = db.Column(db.String(120), nullable=True) # id provided by 'gmail' or 'dropbox'
 
 
-    def __init__(self, email, first_name, last_name, phone_number, password, is_active, provider, provider_id):
+    def __init__(self, email, first_name, last_name, phone_number, password, is_active, provider, provider_id, provider_token):
         self.email = email
         self.first_name = first_name
         self.last_name = last_name
@@ -76,6 +96,7 @@ class User(db.Model):
         self.is_active = is_active
         self.provider = provider
         self.provider_id = provider_id
+        self.provider_token = provider_token
         
     
     def __repr__(self):
@@ -91,6 +112,17 @@ class User(db.Model):
         return create_access_token(identity={'id': self.id, 'email': self.email, 'first_name': self.first_name, 'last_name': self.last_name, 'phone_number': self.phone_number, 'is_active': self.is_active, 'created_at': self.created_at, 'updated_at': self.updated_at, 'provider': self.provider, 'provider_id': self.provider_id})
     
 #HELPER
+def login_user(data):
+    new_user = User(email=data['email'], 
+                    first_name=data['first_name'], 
+                    last_name=data['last_name'], 
+                    phone_number=data['phone_number'], 
+                    password=data['password'], 
+                    is_active=True, 
+                    provider=data['provider'], 
+                    provider_id=data['provider_id'])
+    db.session.add(new_user)
+    db.session.commit()
 def list_files_and_folders(folder_path, access_token, file_types=None):
     if not access_token:
         return jsonify({'error': 'Dropbox authentication required'})
@@ -153,6 +185,141 @@ def login():
         return jsonify({'message': 'Invalid email or password'}), 401
     
     
+#-----GOOGLE AUTH AUTHENTICATION-----
+#https://127.0.0.1:80/google_start
+#https://127.0.0.1:80//google_signup
+@app.route("/google_signup", methods=["GET"])
+def google_login_new():
+    # Find out what URL to hit for Google login
+    google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
+    authorization_endpoint = google_provider_cfg["authorization_endpoint"]
+
+    # Use library to construct the request for Google login and provide
+    # scopes that let you retrieve user's profile from Google
+    request_uri = client.prepare_request_uri(
+        authorization_endpoint,
+        redirect_uri=gdata['web']["redirect_uris"][0],
+        scope=["openid", "email", "profile", "https://www.googleapis.com/auth/drive"],
+        access_type='offline'
+    )
+    return redirect(request_uri)
+
+
+@app.route("/google_connect", methods=["GET"])
+@jwt_required()
+def google_login_old():
+    user_id = get_jwt_identity()["id"]
+
+    # Encrypt the user's ID
+    encrypted_user_id = cipher_suite.encrypt(user_id.encode()).decode()
+    # Find out what URL to hit for Google login
+    google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
+    authorization_endpoint = google_provider_cfg["authorization_endpoint"]
+
+    # Use library to construct the request for Google login and provide
+    # scopes that let you retrieve user's profile from Google
+    request_uri = client.prepare_request_uri(
+        authorization_endpoint,
+        redirect_uri = gdata['web']["redirect_uris"][0] + '?user_id=' + encrypted_user_id,
+        scope=["openid", "email", "profile", "https://www.googleapis.com/auth/drive"],
+        access_type='offline'
+    )
+    return redirect(request_uri)
+
+@app.route("/google_finish", methods=["GET"])
+def callback():
+    # Get authorization code Google sent back to you
+    code = request.args.get("code")
+    google_provider_cfg = requests.get(GOOGLE_DISCOVERY_URL).json()
+    token_endpoint = google_provider_cfg["token_endpoint"]
+
+    token_url, headers, body = client.prepare_token_request(
+        token_endpoint,
+        authorization_response=request.url,
+        redirect_url=request.base_url,
+        code=code
+    )
+    token_response = requests.post(
+        token_url,
+        headers=headers,
+        data=body,
+        auth=(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET),
+    )
+
+    client.parse_request_body_response(json.dumps(token_response.json()))
+
+    userinfo_endpoint = google_provider_cfg["userinfo_endpoint"]
+    uri, headers, body = client.add_token(userinfo_endpoint)
+    userinfo_response = requests.get(uri, headers=headers, data=body)
+
+    if userinfo_response.json().get("email_verified"):
+        unique_id = userinfo_response.json()["sub"]
+        users_email = userinfo_response.json()["email"]
+        picture = userinfo_response.json()["picture"]
+        users_name = userinfo_response.json()["given_name"]
+        
+    else:
+        return "User email not available or not verified by Google.", 400
+
+    # Doesn't exist? Add it to the database.
+    # Get the encrypted user's ID from the query parameters of the request URL
+    existing_user = User.query.filter_by(email=users_email).first()
+    encrypted_user_id = request.args.get('user_id')
+    
+    
+    if  encrypted_user_id:
+        # Get the encrypted user's ID from the query parameters of the request URL
+        # Decrypt the user's ID
+        user_id = cipher_suite.decrypt(encrypted_user_id.encode()).decode()
+        user = User.query.get(user_id)
+        if user:
+            db.session.add(user)
+            db.session.commit()
+            provider_token = {
+                "access_token": token_response.json()["access_token"],
+                "id_token": token_response.json()["id_token"],
+                "token_type": token_response.json()["token_type"],
+                "expires_in": token_response.json()["expires_in"]
+            }
+            user.provider_token = json.dumps(provider_token)
+            return jsonify({'token': user.get_jwt_token(), 'user_id': user.id}), 200
+        else:
+            return jsonify({'message': 'User not found'}), 404
+        
+        
+    elif existing_user: #email already in db
+        user = existing_user
+        db.session.add(user)
+        db.session.commit()
+        provider_token = {
+            "access_token": token_response.json()["access_token"],
+            "id_token": token_response.json()["id_token"],
+            "token_type": token_response.json()["token_type"],
+            "expires_in": token_response.json()["expires_in"]
+        }
+        user.provider_token = json.dumps(provider_token)
+        return jsonify({'token': user.get_jwt_token(), 'user_id': user.id}), 200
+            
+        
+    else: #new user
+        # print("TOKEN: ", token_response.json())
+        provider_token = {
+            "access_token": token_response.json()["access_token"],
+            "id_token": token_response.json()["id_token"],
+            "token_type": token_response.json()["token_type"],
+            "expires_in": token_response.json()["expires_in"]
+        }
+        
+        user = User(email=users_email, first_name=users_name, last_name="", phone_number="", password="password", is_active=True, provider='google', provider_id=unique_id, provider_token=json.dumps(provider_token))
+        db.session.add(user)
+        db.session.commit()
+        return jsonify({'token': user.get_jwt_token(), 'user_id': user.id}), 200
+    
+    
+    
+
+ 
+    
 #-----DROPBOX AUTHENTICATION-----
 
 #http://127.0.0.1:80/dropbox-auth-start
@@ -160,9 +327,12 @@ def login():
 @jwt_required()
 # def dropbox_auth_start():
 #     authorize_url = flow.start()
+#     csrf_token_encrypted =cipher_suite.encrypt(flow.csrf_token_session_key.encode()).decode()
+#     authorize_url = authorize_url + '?user_id=' + csrf_token_encrypted
 #     response = make_response(redirect(authorize_url))
-#     response.set_cookie('csrf_token', flow.session[flow.csrf_token_session_key], secure=True, httponly=True)
+    
 #     return response
+
 def dropbox_auth_start():
     authorize_url = flow.start()
     if authorize_url:
@@ -215,13 +385,16 @@ def list_files():
 #     else:
 #         return jsonify({'message': 'Invalid token'}), 401
     
-    
+
  
 if __name__ == '__main__':
+    
     with app.app_context():
         #db.drop_all()  # Drop all tables
         db.create_all()  # Create all tables
-    app.run(host='0.0.0.0', port=80, debug=True)
+    app.run(host='0.0.0.0', port=80, debug=True,
+            ssl_context=('cert.pem', 'key.pem')
+            )
 
 
 
